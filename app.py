@@ -24,43 +24,10 @@ import os
 import pandas as pd
 import base64
 import json
-import re
 from io import BytesIO
+from dotenv import load_dotenv
 
 # --- Core Logic from Previous Script ---
-
-# FINAL FIX: Manual .env file loader
-def load_env_manually(dotenv_path):
-    """
-    Manually reads and parses a .env file to set environment variables.
-    This version reads the file in binary mode and removes null bytes to
-    bypass stubborn decoding errors.
-    """
-    if not os.path.exists(dotenv_path):
-        st.error(f"Error: .env file not found at {dotenv_path}. Please create it and add your GEMINI_API_KEY.")
-        return False
-        
-    try:
-        with open(dotenv_path, 'rb') as f:
-            raw_data = f.read()
-        
-        sanitized_data = raw_data.replace(b'\x00', b'')
-        content = sanitized_data.decode('utf-8-sig', errors='ignore')
-
-        for line in content.splitlines():
-            line = line.strip()
-            if line and not line.startswith('#') and '=' in line:
-                key, value = line.split('=', 1)
-                key = key.strip()
-                value = value.strip()
-                if (value.startswith('"') and value.endswith('"')) or \
-                   (value.startswith("'") and value.endswith("'")):
-                    value = value[1:-1]
-                os.environ[key] = value
-        return True
-    except Exception as e:
-        st.error(f"An error occurred while manually reading the .env file: {e}")
-        return False
 
 # Function to prepare image for API
 def prepare_image_from_upload(uploaded_file):
@@ -71,7 +38,7 @@ def prepare_image_from_upload(uploaded_file):
         # Convert to an OpenCV image
         nparr = np.frombuffer(image_bytes, np.uint8)
         img_cv = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-        
+
         # Encode the image to a PNG format in memory
         _, buffer = cv2.imencode('.png', img_cv)
         # Convert the buffer to a base64 string
@@ -85,7 +52,7 @@ def prepare_image_from_upload(uploaded_file):
 def extract_table_with_ai(base64_image_data, api_key):
     """Sends the image to the Gemini API and asks it to extract the table data."""
     if not api_key:
-        st.error("Error: Gemini API key not found. Make sure it's set in your .env file.")
+        st.error("Error: Gemini API key not found. Make sure it's set in your .env file or Streamlit secrets.")
         return None
 
     prompt = """
@@ -97,7 +64,7 @@ def extract_table_with_ai(base64_image_data, api_key):
     Handle multi-line text in a cell by combining it into a single string.
     If you cannot find a table, return an empty list.
     """
-    
+
     payload = {
         "contents": [
             {
@@ -118,15 +85,21 @@ def extract_table_with_ai(base64_image_data, api_key):
         }
     }
 
-    api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}"
-    
+    api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-pro-vision?key={api_key}"
+
     try:
         response = requests.post(api_url, headers={'Content-Type': 'application/json'}, json=payload, timeout=120)
         response.raise_for_status()
         result = response.json()
-        
+
         if (result.get('candidates') and result['candidates'][0].get('content') and result['candidates'][0]['content'].get('parts')):
+            # The response is often wrapped in markdown, so we clean it
             json_response_text = result['candidates'][0]['content']['parts'][0]['text']
+            # Find the JSON object within the text
+            match = re.search(r"```json\s*(\{.*?\})\s*```", json_response_text, re.DOTALL)
+            if match:
+                 json_response_text = match.group(1)
+
             parsed_json = json.loads(json_response_text)
             table_data = parsed_json.get("table_data", [])
             return table_data if table_data else None
@@ -137,8 +110,14 @@ def extract_table_with_ai(base64_image_data, api_key):
         st.error(f"An error occurred during the API request: {e}")
         return None
     except json.JSONDecodeError as e:
-        st.error(f"Error decoding JSON from AI response: {e}. Raw response text: {response.text}")
+        st.error(f"Error decoding JSON from AI response: {e}. Raw response text: {json_response_text}")
         return None
+    except Exception as e:
+        st.error(f"An unexpected error occurred: {e}")
+        # Log the full response for debugging
+        st.code(result, language='json')
+        return None
+
 
 # Function to convert DataFrame to Excel in memory
 def to_excel(df):
@@ -152,11 +131,10 @@ def to_excel(df):
 
 def main():
     st.set_page_config(page_title="AI Table Extractor", layout="wide")
-
-    # Load API Key
-    # Assumes .env file is in the root directory where you run `streamlit run`
-    dotenv_path = os.path.join(os.getcwd(), '.env')
-    load_env_manually(dotenv_path)
+    
+    # Load environment variables.
+    # This will automatically look for a .env file in the root directory.
+    load_dotenv() 
     gemini_api_key = os.getenv("GEMINI_API_KEY")
 
     st.title("📄 AI-Powered Table Extractor")
@@ -173,11 +151,11 @@ def main():
         col1, col2 = st.columns(2)
         with col1:
             st.image(uploaded_file, caption="Uploaded Image", use_column_width=True)
-        
+
         with col2:
             if st.button("Extract Table from Image", type="primary"):
                 if not gemini_api_key:
-                    st.warning("Please add your Gemini API Key to the .env file before proceeding.")
+                    st.warning("Please add your Gemini API Key to a `.env` file in the project directory.")
                 else:
                     with st.spinner("The AI is analyzing the image. Please wait..."):
                         # Process the image
@@ -186,27 +164,39 @@ def main():
                             table_data = extract_table_with_ai(base64_image, gemini_api_key)
                             if table_data:
                                 try:
+                                    # Identify header and data
+                                    header = table_data[0]
+                                    data = table_data[1:]
                                     # Store DataFrame in session state
-                                    st.session_state.extracted_df = pd.DataFrame(table_data)
+                                    st.session_state.extracted_df = pd.DataFrame(data, columns=header)
                                     st.success("Table extracted successfully!")
-                                except ValueError:
-                                    st.error("Extraction failed. The AI returned rows with different numbers of columns.")
-                                    st.session_state.extracted_df = None
+                                except ValueError as e:
+                                    st.error(f"Extraction failed: The AI returned rows with different numbers of columns. Error: {e}")
+                                    st.info("Attempting to load without assuming a header...")
+                                    try:
+                                        # Fallback: load without a header
+                                        st.session_state.extracted_df = pd.DataFrame(table_data)
+                                    except Exception as ex:
+                                        st.error(f"Fallback failed. Could not create DataFrame. Error: {ex}")
+                                        st.session_state.extracted_df = None
+                                except IndexError:
+                                     st.error("Extraction failed: The AI returned data that seems to be empty or malformed.")
+                                     st.session_state.extracted_df = None
                             else:
                                 st.error("The AI could not find a table in the image or failed to extract data.")
                                 st.session_state.extracted_df = None
 
     # Display the extracted data and download buttons if a DataFrame exists
-    if st.session_state.extracted_df is not None:
-        st.subheader("Extracted Data")
+    if st.session_state.extracted_df is not None and not st.session_state.extracted_df.empty:
+        st.subheader("Extracted Data Preview")
         st.dataframe(st.session_state.extracted_df)
 
         st.subheader("Download Extracted Data")
-        col1, col2 = st.columns(2)
+        col1_dl, col2_dl = st.columns(2)
 
         # CSV Download
         csv = st.session_state.extracted_df.to_csv(index=False, encoding='utf-8-sig')
-        col1.download_button(
+        col1_dl.download_button(
             label="Download as CSV",
             data=csv,
             file_name="extracted_table.csv",
@@ -215,7 +205,7 @@ def main():
 
         # Excel Download
         excel_data = to_excel(st.session_state.extracted_df)
-        col2.download_button(
+        col2_dl.download_button(
             label="Download as Excel",
             data=excel_data,
             file_name="extracted_table.xlsx",
