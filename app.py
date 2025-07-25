@@ -14,17 +14,26 @@ from dotenv import load_dotenv
 # --- Core Logic from Previous Script ---
 
 def prepare_image_from_upload(uploaded_file):
-    """Converts an uploaded image file to a base64 encoded string."""
+    """Converts and resizes an uploaded image file to a base64 encoded string."""
     try:
-        # Read the file bytes
         image_bytes = uploaded_file.getvalue()
-        # Convert to an OpenCV image
         nparr = np.frombuffer(image_bytes, np.uint8)
         img_cv = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
-        # Encode the image to a PNG format in memory
+        # --- Optimization: Resize Image ---
+        max_dim = 2048
+        h, w, _ = img_cv.shape
+        if h > max_dim or w > max_dim:
+            if h > w:
+                new_h = max_dim
+                new_w = int(w * (max_dim / h))
+            else:
+                new_w = max_dim
+                new_h = int(h * (max_dim / w))
+            img_cv = cv2.resize(img_cv, (new_w, new_h))
+        # --- End of Optimization ---
+
         _, buffer = cv2.imencode('.png', img_cv)
-        # Convert the buffer to a base64 string
         base64_image = base64.b64encode(buffer).decode('utf-8')
         return base64_image
     except Exception as e:
@@ -37,15 +46,20 @@ def extract_table_with_ai(base64_image_data, api_key, model_name):
         st.error("Error: Gemini API key not found. Make sure it's set in your .env file or Streamlit secrets.")
         return None
 
+    # --- Optimized Prompt ---
     prompt = """
-    Analyze the provided image. Identify the primary table within it.
-    Extract all the data from the table, row by row.
-    Return the result as a single JSON object. The object should have a key "table_data"
-    which contains a list of lists. Each inner list represents a row from the table,
-    and each item in the inner list should be a string representing the text in a cell.
-    Handle multi-line text in a cell by combining it into a single string.
-    If you cannot find a table, return an empty list.
-    The first inner list should be the table's header row.
+    Analyze the provided image to identify the primary data table. Your task is to extract its content with high precision.
+
+    Instructions:
+    1.  **JSON Output:** Return a single JSON object with one key: "table_data".
+    2.  **Structure:** The value of "table_data" must be a list of lists, where each inner list represents a table row.
+    3.  **Header First:** The very first inner list must be the table's header row.
+    4.  **Handle Merged Cells:** If a cell spans multiple rows or columns, repeat its value in each corresponding cell of the output.
+    5.  **Empty Cells:** Represent any visually empty cells as an empty string ("").
+    6.  **Multi-line Text:** Combine text from multiple lines within a single cell into one string, using a space as a separator.
+    7.  **Accuracy is Key:** Do not invent data. If you cannot find a table, return an empty list for "table_data".
+
+    Begin the extraction now.
     """
 
     payload = {
