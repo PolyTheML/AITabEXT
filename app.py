@@ -1,20 +1,3 @@
-# -*- coding: utf-8 -*-
-"""
-Streamlit Web App for AI-Powered Table Extraction
-
-This script creates a user-friendly web interface where users can upload an
-image of a table, and the application will use an AI model (Gemini) to extract
-the data and provide it as a downloadable CSV or Excel file.
-
-To run this app:
-1.  Make sure you have all necessary libraries installed:
-    pip install streamlit opencv-python numpy pandas requests Pillow python-dotenv openpyxl
-2.  Ensure you have a .env file in the root directory of this project with your
-    GEMINI_API_KEY.
-3.  Run the app from your terminal:
-    streamlit run your_script_name.py
-"""
-
 import streamlit as st
 import cv2
 import numpy as np
@@ -24,6 +7,7 @@ import os
 import pandas as pd
 import base64
 import json
+import re
 from io import BytesIO
 from dotenv import load_dotenv
 
@@ -49,7 +33,8 @@ def prepare_image_from_upload(uploaded_file):
         return None
 
 # AI Model for Table Extraction
-def extract_table_with_ai(base64_image_data, api_key):
+# Updated to accept a model_name parameter
+def extract_table_with_ai(base64_image_data, api_key, model_name):
     """Sends the image to the Gemini API and asks it to extract the table data."""
     if not api_key:
         st.error("Error: Gemini API key not found. Make sure it's set in your .env file or Streamlit secrets.")
@@ -63,6 +48,7 @@ def extract_table_with_ai(base64_image_data, api_key):
     and each item in the inner list should be a string representing the text in a cell.
     Handle multi-line text in a cell by combining it into a single string.
     If you cannot find a table, return an empty list.
+    The first inner list should be the table's header row.
     """
 
     payload = {
@@ -85,37 +71,31 @@ def extract_table_with_ai(base64_image_data, api_key):
         }
     }
 
-    api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-pro-vision?key={api_key}"
+    # Use the selected model name to build the API URL
+    api_url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
 
     try:
         response = requests.post(api_url, headers={'Content-Type': 'application/json'}, json=payload, timeout=120)
-        response.raise_for_status()
+        response.raise_for_status() # This will raise an HTTPError for bad responses (4xx or 5xx)
         result = response.json()
 
-        if (result.get('candidates') and result['candidates'][0].get('content') and result['candidates'][0]['content'].get('parts')):
-            # The response is often wrapped in markdown, so we clean it
-            json_response_text = result['candidates'][0]['content']['parts'][0]['text']
-            # Find the JSON object within the text
-            match = re.search(r"```json\s*(\{.*?\})\s*```", json_response_text, re.DOTALL)
-            if match:
-                 json_response_text = match.group(1)
+        json_response_text = result['candidates'][0]['content']['parts'][0]['text']
+        parsed_json = json.loads(json_response_text)
+        table_data = parsed_json.get("table_data", [])
+        return table_data if table_data else None
 
-            parsed_json = json.loads(json_response_text)
-            table_data = parsed_json.get("table_data", [])
-            return table_data if table_data else None
-        else:
-            st.error(f"Error: AI response was not in the expected format. Full response: {result}")
-            return None
+    except requests.exceptions.HTTPError as err:
+        st.error(f"An HTTP error occurred: {err}")
+        st.code(err.response.text, language='json') # Show the actual error response from the API
+        return None
     except requests.exceptions.RequestException as e:
         st.error(f"An error occurred during the API request: {e}")
         return None
     except json.JSONDecodeError as e:
-        st.error(f"Error decoding JSON from AI response: {e}. Raw response text: {json_response_text}")
+        st.error(f"Error decoding JSON from AI response: {e}. Raw response text was: {json_response_text}")
         return None
-    except Exception as e:
-        st.error(f"An unexpected error occurred: {e}")
-        # Log the full response for debugging
-        st.code(result, language='json')
+    except (KeyError, IndexError) as e:
+        st.error(f"AI response was not in the expected format. Full response: {result}")
         return None
 
 
@@ -131,14 +111,30 @@ def to_excel(df):
 
 def main():
     st.set_page_config(page_title="AI Table Extractor", layout="wide")
-    
+
     # Load environment variables.
-    # This will automatically look for a .env file in the root directory.
-    load_dotenv() 
+    load_dotenv()
     gemini_api_key = os.getenv("GEMINI_API_KEY")
 
     st.title("📄 AI-Powered Table Extractor")
-    st.markdown("Upload an image containing a table, and the AI will extract the data for you to download.")
+    st.markdown("Upload an image, choose a model, and the AI will extract the data for you.")
+
+    # --- Sidebar for Options ---
+    with st.sidebar:
+        st.header("⚙️ Options")
+        
+        # Add a selectbox for the user to choose the model
+        model_options = [
+            "gemini-2.5-pro", 
+            "gemini-2.5-flash", 
+            "gemini-2.5-flash-lite", 
+            "gemini-2.0-flash"
+        ]
+        selected_model = st.selectbox(
+            "Choose your Gemini model:",
+            options=model_options,
+            help="**Flash** is faster and cheaper. **Pro** is more powerful and accurate."
+        )
 
     # Initialize session state to hold the DataFrame
     if 'extracted_df' not in st.session_state:
@@ -157,41 +153,41 @@ def main():
                 if not gemini_api_key:
                     st.warning("Please add your Gemini API Key to a `.env` file in the project directory.")
                 else:
-                    with st.spinner("The AI is analyzing the image. Please wait..."):
-                        # Process the image
+                    with st.spinner(f"The AI is analyzing the image with **{selected_model}**. Please wait..."):
                         base64_image = prepare_image_from_upload(uploaded_file)
                         if base64_image:
-                            table_data = extract_table_with_ai(base64_image, gemini_api_key)
-                            if table_data:
+                            # Pass the selected model to the extraction function
+                            table_data = extract_table_with_ai(base64_image, gemini_api_key, selected_model)
+                            if table_data and len(table_data) > 1:
                                 try:
-                                    # Identify header and data
                                     header = table_data[0]
                                     data = table_data[1:]
-                                    # Store DataFrame in session state
                                     st.session_state.extracted_df = pd.DataFrame(data, columns=header)
                                     st.success("Table extracted successfully!")
-                                except ValueError as e:
-                                    st.error(f"Extraction failed: The AI returned rows with different numbers of columns. Error: {e}")
-                                    st.info("Attempting to load without assuming a header...")
+                                except (ValueError, IndexError):
+                                    st.error("Data Mismatch: Trying to load without a header.")
                                     try:
-                                        # Fallback: load without a header
                                         st.session_state.extracted_df = pd.DataFrame(table_data)
                                     except Exception as ex:
                                         st.error(f"Fallback failed. Could not create DataFrame. Error: {ex}")
                                         st.session_state.extracted_df = None
-                                except IndexError:
-                                     st.error("Extraction failed: The AI returned data that seems to be empty or malformed.")
-                                     st.session_state.extracted_df = None
+                            elif table_data:
+                                 st.warning("Only one row of data was extracted. Displaying without a header.")
+                                 st.session_state.extracted_df = pd.DataFrame(table_data)
                             else:
-                                st.error("The AI could not find a table in the image or failed to extract data.")
+                                st.error("The AI could not find a table in the image or the API call failed.")
                                 st.session_state.extracted_df = None
 
-    # Display the extracted data and download buttons if a DataFrame exists
+    # Display the extracted data and download options if a DataFrame exists
     if st.session_state.extracted_df is not None and not st.session_state.extracted_df.empty:
         st.subheader("Extracted Data Preview")
         st.dataframe(st.session_state.extracted_df)
 
         st.subheader("Download Extracted Data")
+
+        # Add a text input for the user to name the file
+        file_name_input = st.text_input("Enter your desired filename (without extension)", "extracted_table")
+
         col1_dl, col2_dl = st.columns(2)
 
         # CSV Download
@@ -199,7 +195,7 @@ def main():
         col1_dl.download_button(
             label="Download as CSV",
             data=csv,
-            file_name="extracted_table.csv",
+            file_name=f"{file_name_input}.csv", # Use the user's input for the filename
             mime="text/csv",
         )
 
@@ -208,7 +204,7 @@ def main():
         col2_dl.download_button(
             label="Download as Excel",
             data=excel_data,
-            file_name="extracted_table.xlsx",
+            file_name=f"{file_name_input}.xlsx", # Use the user's input for the filename
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
 
