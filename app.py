@@ -1,20 +1,3 @@
-# -*- coding: utf-8 -*-
-"""
-Streamlit Web App for AI-Powered Table Extraction and ETL
-
-This script creates a user-friendly web interface where users can upload an
-image of a table, and the application will use an AI model (Gemini or Claude) 
-to extract, transform, and load the data into a chosen database.
-
-To run this app:
-1.  Make sure you have all necessary libraries installed:
-    pip install streamlit opencv-python numpy pandas requests Pillow python-dotenv openpyxl pandas-gbq google-cloud-bigquery sqlalchemy psycopg2-binary anthropic
-2.  Ensure you have a .env file in the root directory with your
-    GEMINI_API_KEY and/or ANTHROPIC_API_KEY.
-3.  Run the app from your terminal:
-    streamlit run your_script_name.py
-"""
-
 import streamlit as st
 import cv2
 import numpy as np
