@@ -1,8 +1,13 @@
 streamlit
-pandas
+opencv-python
 numpy
+pandas
 requests
 Pillow
-opencv-python
 python-dotenv
 openpyxl
+sqlalchemy
+psycopg2-binary
+anthropic
+pandas-gbq
+google-cloud-bigquery
